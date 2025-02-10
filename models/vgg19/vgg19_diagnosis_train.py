@@ -8,6 +8,7 @@ import gc
 from pathlib import Path, PurePath
 import logging
 import json
+import csv
 
 import pandas as pd
 from sklearn.utils import class_weight
@@ -32,7 +33,6 @@ def set_seeds():
     random.seed(42)
     tf.random.set_seed(42)
 
-# Define custom F1 score metric
 @keras.saving.register_keras_serializable()
 def f1_score_normal(y_true, y_pred): #taken from old keras source code
     true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
@@ -42,6 +42,14 @@ def f1_score_normal(y_true, y_pred): #taken from old keras source code
     recall = true_positives / (possible_positives + K.epsilon())
     f1_val = 2*(precision*recall)/(precision+recall+K.epsilon())
     return f1_val
+
+def f1_score_other(y_true, y_pred):
+    f1_val = f1_score(y_true, y_pred)
+    recall = recall_score(y_true, y_pred)
+    precision = precision_score(y_true, y_pred)
+    accuracy = accuracy_score(y_true, y_pred)
+    
+    return f1_val, recall, precision, accuracy
 
 def preprocess_input_vgg19(x):
     return tf.keras.applications.vgg19.preprocess_input(x)
@@ -63,15 +71,15 @@ def get_data_generators(train_path, valid_path, test_path, best_params):
     
     test_datagen = ImageDataGenerator(preprocessing_function=preprocess_input_vgg19)
 
-    classes = {'2SKC_No_Glaucoma': 0, '2SKA_Suspected_Glaucoma': 1}
-
+    classes = {'No_Glaucoma': 0, 'Suspected_Glaucoma': 1}
+       
     train_generator = train_datagen.flow_from_directory(
         train_path,
         target_size=(224, 224),
         class_mode='binary',
         classes = classes
     )
-    
+
     validation_generator = val_datagen.flow_from_directory(
         valid_path,
         target_size=(224, 224),
@@ -85,6 +93,10 @@ def get_data_generators(train_path, valid_path, test_path, best_params):
         class_mode='binary',
         classes = classes
     )
+
+    print("train path: ", train_path)
+    print("validation path: ", valid_path)
+    print("test path: ", test_path)
     
     print("train_generator.class_indices : ", train_generator.class_indices)
     print("validation_generator.class_indices : ", validation_generator.class_indices)
@@ -92,103 +104,174 @@ def get_data_generators(train_path, valid_path, test_path, best_params):
     
     return train_generator, validation_generator, test_generator
 
-def train_and_evaluate(train_path, valid_path, test_path, output_path, best_params, model_name):
-    set_seeds()
+def prediction(model, model_name, graded_test_generator, output_dir, best_params):
 
-    train_generator, validation_generator, test_generator = get_data_generators(train_path, valid_path, test_path, best_params)
+    filenames = []
+    y_true = []
+    y_pred = []
+    scores = []
+    # strategy = tf.distribute.OneDeviceStrategy("/GPU:0")
+    # with strategy.scope():
+    for i in range(len(graded_test_generator)):
+        # Get a batch of data
+        batch_data = graded_test_generator[i]
+        image_batch, label_batch = batch_data[0], batch_data[1]
+        batch_filenames = graded_test_generator.filenames[
+                          i * graded_test_generator.batch_size: (i + 1) * graded_test_generator.batch_size]
+
+        # Make predictions
+        
+        predictions = model.predict_on_batch(image_batch).flatten()
+
+        # append bath data to lists
+        scores.extend(predictions)
+
+        # Binarize the predictions
+        predictions = tf.where(predictions < 0.5, 0, 1).numpy()
+
+        # Append batch data to lists
+        filenames.extend(batch_filenames)
+        y_true.append(label_batch.flatten())
+        y_pred.append(predictions.flatten())
+        
+    y_true = np.concatenate(y_true).flatten()
+    y_pred = np.concatenate(y_pred).flatten()
     
+    f1_val, recall, precision, accuracy = f1_score_other(y_true, y_pred)
+
+    # Write to CSV file
+    output_dir.mkdir(parents=True, exist_ok=True)
+    predictions_results  = output_dir / f"{model_name}_predictions_results.csv"
+    metrics_summary = output_dir / f"{model_name}_metrics_summary.csv"
+    with open(predictions_results, 'w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(['Filename', 'True Label', 'Prediction', 'Probability Score'])
+
+        for i in range(len(filenames)):
+            writer.writerow([filenames[i], y_true[i], y_pred[i], scores[i]])
+
+    with open(metrics_summary, 'w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(['Metric', 'Value'])
+        writer.writerow(['F1 Score', f1_val])
+        writer.writerow(['Precision', precision])
+        writer.writerow(['Recall', recall])
+        writer.writerow(['Accuracy', accuracy])
+
+    logging.info(f"Predictions saved to {model_name}_predictions_results.csv")
+    logging.info(f"Metrics saved to {model_name}metrics_summary.csv")
+
+    return predictions_results, metrics_summary
+
+def train_and_evaluate(train_path, 
+                    valid_path, 
+                       test_path, 
+                       model_path,
+                       log_path,
+                       eval_path,
+                       best_hyperparameters_json_path, 
+                       model_name):
+
+    logging.basicConfig(level=logging.INFO)
+    
+    # Load best parameters from JSON
+    with open(best_hyperparameters_json_path, 'r') as file:
+        best_params = json.load(file)
+    
+    set_seeds()
+    train_generator, validation_generator, test_generator = get_data_generators(train_path, valid_path, test_path, best_params)
         
     # Model building
     K.clear_session()  # Clear session
-    base_model = VGG19(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
-    base_model.trainable = False  # Freeze the base model
+    strategy = tf.distribute.OneDeviceStrategy("/GPU:0")
+    with strategy.scope():
+        base_model = VGG19(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
+        base_model.trainable = False  # Freeze the base model
+        
+        inputs = keras.Input(shape=(224, 224, 3))
+        x = base_model(inputs, training=False)
+        
+        # GlobalAveragePooling2D or Flatten based on best_params
+        if best_params['pooling'] == 'global_average':
+            x = GlobalAveragePooling2D()(x)
+        else:
+            x = Flatten()(x)
+        
+        # Add dense layers
+        for i in range(best_params['dense_layers']):
+            num_units = best_params[f'units_layer_{i}']
+            activation = best_params[f'activation_func_{i}']
+            x = Dense(num_units, activation=activation)(x)
+        
+            if best_params[f'batch_norm_{i}']:
+                x = BatchNormalization()(x)
+        
+            x = Dropout(best_params[f'dropout_{i}'])(x)
+        
+        outputs = Dense(1, activation='sigmoid')(x)
+        model = Model(inputs, outputs)
+        
+        # Unfreeze the base_model
+        base_model.trainable = True
+        for layer in base_model.layers[:best_params['fine_tune_at']]:
+            layer.trainable = False
+        
+        # Compile model
+        optimizer = Adam(learning_rate=best_params['fine_tuning_learning_rate_adam'])
+        model.compile(
+        
+            optimizer=optimizer,
+            loss=BinaryCrossentropy(),
+            metrics=[  # ROC A
+                # tf.keras.metrics.AUC(curve="PR",name="pr_auc_score"),
+                tf.keras.metrics.AUC(curve="ROC",name="roc_auc_score"),
+                f1_score_normal,
+                # f1_score_macro,
+                # tf.keras.metrics.Precision(name="precision_score"),
+                # tf.keras.metrics.Recall(name="recall_score"),
+                tf.keras.metrics.BinaryAccuracy(name="accuracy_score"),
+                # tfa.metrics.MatthewsCorrelationCoefficient(num_classes=2, name='mcc_score')
+                # matthews_correlation
+                           ]
+            )
+        print("Model weights device location:", model.weights[0].device)
+        # Training
+        class_weights = None
+        if best_params['use_class_weights']:
+            class_weights = class_weight.compute_class_weight(class_weight='balanced', classes=np.unique(train_generator.classes), y=train_generator.classes)
+            class_weights = dict(enumerate(class_weights))
     
-    inputs = keras.Input(shape=(224, 224, 3))
-    x = base_model(inputs, training=False)
+        num_workers = os.cpu_count()
     
-    # GlobalAveragePooling2D or Flatten based on best_params
-    if best_params['pooling'] == 'global_average':
-        x = GlobalAveragePooling2D()(x)
-    else:
-        x = Flatten()(x)
-    
-    # Add dense layers
-    for i in range(best_params['dense_layers']):
-        num_units = best_params[f'units_layer_{i}']
-        activation = best_params[f'activation_func_{i}']
-        x = Dense(num_units, activation=activation)(x)
-    
-        if best_params[f'batch_norm_{i}']:
-            x = BatchNormalization()(x)
-    
-        x = Dropout(best_params[f'dropout_{i}'])(x)
-    
-    outputs = Dense(1, activation='sigmoid')(x)
-    model = Model(inputs, outputs)
-    
-    # Unfreeze the base_model
-    base_model.trainable = True
-    for layer in base_model.layers[:best_params['fine_tune_at']]:
-        layer.trainable = False
-    
-    # Compile model
-    optimizer = Adam(learning_rate=best_params['fine_tuning_learning_rate_adam'])
-    model.compile(
-    
-        optimizer=optimizer,
-        loss=BinaryCrossentropy(),
-        metrics=[  # ROC A
-            # tf.keras.metrics.AUC(curve="PR",name="pr_auc_score"),
-            tf.keras.metrics.AUC(curve="ROC",name="roc_auc_score"),
-            f1_score_normal,
-            # f1_score_macro,
-            # tf.keras.metrics.Precision(name="precision_score"),
-            # tf.keras.metrics.Recall(name="recall_score"),
-            tf.keras.metrics.BinaryAccuracy(name="accuracy_score"),
-            # tfa.metrics.MatthewsCorrelationCoefficient(num_classes=2, name='mcc_score')
-            # matthews_correlation
-                       ]
-        )
-    
-    # Training
-    class_weights = None
-    if best_params['use_class_weights']:
-        class_weights = class_weight.compute_class_weight(class_weight='balanced', classes=np.unique(train_generator.classes), y=train_generator.classes)
-        class_weights = dict(enumerate(class_weights))
-
-    num_workers = os.cpu_count()
-
-    training_log = model.fit(
-        train_generator,
-        epochs=100,
-        validation_data=validation_generator,
-        batch_size=best_params['batch_size'],
-        class_weight=class_weights,
-        workers=num_workers,
-        use_multiprocessing=True,
-        callbacks=[EarlyStopping(monitor='val_loss', patience=10, verbose=1),
-                    EarlyStopping(monitor='val_roc_auc_score', mode='max', verbose=1, patience=8, restore_best_weights=True),
-                       ], )
-    
-
-    # Evaluate the model on the test set
-    results = model.evaluate(test_generator)
-    logging.info(f"""Test results - {results}""")
-
-    print(f"""Model Eval results: {results}""")
-
+        training_log = model.fit(
+            train_generator,
+            epochs=100,
+            validation_data=validation_generator,
+            batch_size=best_params['batch_size'],
+            class_weight=class_weights,
+            workers=num_workers,
+            use_multiprocessing=True,
+            callbacks=[EarlyStopping(monitor='val_loss', patience=10, verbose=1),
+                        EarlyStopping(monitor='val_roc_auc_score', mode='max', verbose=1, patience=8, restore_best_weights=True),
+                           ], )
+        predictions_results, metrics_summary = prediction(model=model, 
+                   model_name=model_name, 
+                   graded_test_generator=test_generator, 
+                   output_dir=eval_path, 
+                   best_params=best_params)
+        
     if model_name:
-        model.save(os.path.join(output_path, f'{model_name}.h5'))
+        model_save_path = os.path.join(model_path, f'{model_name}.h5')
     else:
-        model.save(os.path.join(output_path, 'VGG19_Catalog_LAC_DHS_Cropped_Data_Trained_model.h5'))
-    
+        model_save_path = os.path.join(model_path,'VGG19_Catalog_LAC_DHS_Cropped_Data_Trained_model.h5')
+    model.save(model_save_path)
+
     # Convert the history.history dict to a pandas DataFrame:     
     hist_df = pd.DataFrame(training_log.history) 
-
-    # Save to csv: 
-    hist_df.to_csv(os.path.join(output_path, f'training_history_{model_name}.csv'), index=False)
-    
+    training_history_csv = os.path.join(log_path, f'training_history_{model_name}.csv')
+    hist_df.to_csv(training_history_csv, index=False)
     logging.info(f"{model_name} Model trained, Model and training history are saved successfully.")
+    return  predictions_results, metrics_summary, model_save_path, training_history_csv
 
 # def main(train_path, valid_path, test_path, output_path):
 #     logging.basicConfig(level=logging.INFO)
@@ -224,14 +307,15 @@ def train_and_evaluate(train_path, valid_path, test_path, output_path, best_para
 
 #     train_and_evaluate(train_path, valid_path, test_path, output_path, best_params)
 
-def main(train_path, valid_path, test_path, output_path, best_hyperparameters_json_path, model_name):
+def main(train_path, valid_path, test_path, model_path, log_path, eval_path,best_hyperparameters_json_path, model_name):
     logging.basicConfig(level=logging.INFO)
     
     # Load best parameters from JSON
     with open(best_hyperparameters_json_path, 'r') as file:
         best_params = json.load(file)
 
-    train_and_evaluate(train_path, valid_path, test_path, output_path, best_params, model_name)
+    train_and_evaluate(train_path, valid_path, test_path, model_path, log_path, eval_path,best_hyperparameters_json_path, model_name)
+
 
 # if __name__ == '__main__':
 #     parser = argparse.ArgumentParser()
