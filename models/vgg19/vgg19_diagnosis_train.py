@@ -171,10 +171,38 @@ def train_and_evaluate(train_path,
                         ):
 
     logging.basicConfig(level=logging.INFO)
-    
-    # Load best parameters from JSON
-    with open(best_hyperparameters_json_path, 'r') as file:
-        best_params = json.load(file)
+    if best_hyperparameters_json_path is None:
+        best_params = {
+            "rotation_range": 5,
+            "width_shift_range": 0.04972485058923855,
+            "height_shift_range": 0.03008783098167697,
+            "horizontal_flip": True,
+            "vertical_flip": True,
+            "zoom_range": -0.044852124875001065,
+            "brightness_range": -0.02213535357633886,
+            "use_class_weights": True,
+            "pooling": "global_average",
+            "dense_layers": 3,
+            "units_layer_0": 64,
+            "activation_func_0": "sigmoid",
+            "batch_norm_0": True,
+            "dropout_0": 0.09325925519992712,
+            "units_layer_1": 64,
+            "activation_func_1": "tanh",
+            "batch_norm_1": True,
+            "dropout_1": 0.17053317552512925,
+            "units_layer_2": 32,
+            "activation_func_2": "relu",
+            "batch_norm_2": True,
+            "dropout_2": 0.31655072863663397,
+            "fine_tune_at": 7,
+            "fine_tuning_learning_rate_adam": 0.00001115908855034341,
+            "batch_size": 32
+        }
+
+    else:
+        with open(best_hyperparameters_json_path, 'r') as file:
+            best_params = json.load(file)
     
     set_seeds()
     train_generator, validation_generator, test_generator = get_data_generators(train_path, valid_path, test_path, best_params)
