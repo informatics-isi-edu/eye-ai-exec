@@ -174,8 +174,8 @@ def train_and_evaluate(train_path,
                        model_path,
                        log_path,
                        eval_path,
-                       best_hyperparameters_json_path, 
                        model_name,
+                       best_hyperparameters_json_path = None, 
                         ):
 
     logging.basicConfig(level=logging.INFO)
