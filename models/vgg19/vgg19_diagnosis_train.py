@@ -40,7 +40,15 @@ def f1_score_normal(y_true, y_pred): #taken from old keras source code
     precision = true_positives / (predicted_positives + K.epsilon())
     recall = true_positives / (possible_positives + K.epsilon())
     f1_val = 2*(precision*recall)/(precision+recall+K.epsilon())
-    return f1_val, recall, precision
+    return f1_val
+
+def metrics_score(y_true, y_pred):
+    f1_val = f1_score(y_true, y_pred)
+    recall = recall_score(y_true, y_pred)
+    precision = precision_score(y_true, y_pred)
+    accuracy = accuracy_score(y_true, y_pred)
+    return f1_val, recall, precision, accuracy
+
 
 def preprocess_input_vgg19(x):
     return tf.keras.applications.vgg19.preprocess_input(x)
@@ -119,7 +127,7 @@ def evaluate_model(model, model_name, test_generator, output_dir):
     y_true = np.concatenate(y_true).flatten()
     y_pred = np.concatenate(y_pred).flatten()
     
-    f1_val, recall, precision, accuracy = f1_score_normal(y_true, y_pred)
+    f1_val, recall, precision, accuracy = metrics_score(y_true, y_pred)
 
     # Write to CSV file
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -158,7 +166,7 @@ def evaluate_only(model_path, model_name, test_path, output_dir):
         class_mode='binary',
         classes = classes
     )
-    evaluate_model(model, model_name, test_generator, output_dir)
+    return evaluate_model(model, model_name, test_generator, output_dir)
 
 def train_and_evaluate(train_path, 
                        valid_path, 
