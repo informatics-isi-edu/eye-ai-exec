@@ -147,7 +147,7 @@ def evaluate_model(model, model_name, test_generator, output_dir):
         writer.writerow(['Accuracy', accuracy])
 
     logging.info(f"Predictions saved to {model_name}_predictions_results.csv")
-    logging.info(f"Metrics saved to {model_name}metrics_summary.csv")
+    logging.info(f"Metrics saved to {model_name}_metrics_summary.csv")
 
     return predictions_results, metrics_summary
 
