@@ -129,8 +129,8 @@ def evaluate_model(model, model_name, test_generator, output_dir):
 
     # Write to CSV file
     output_dir.mkdir(parents=True, exist_ok=True)
-    predictions_results  = output_dir / f"{model_name}_predictions_results.csv"
-    metrics_summary = output_dir / f"{model_name}_metrics_summary.csv"
+    predictions_results  = output_dir / f"{model_name}_predictions_results"
+    metrics_summary = output_dir / f"{model_name}_metrics_summary"
     with open(predictions_results, 'w', newline='') as file:
         writer = csv.writer(file)
         writer.writerow(['Filename', 'True Label', 'Prediction', 'Probability Score'])
@@ -294,7 +294,7 @@ def train_and_evaluate(train_path,
     model.save(model_save_path)
 
     hist_df = pd.DataFrame(training_log.history) 
-    training_history_csv = os.path.join(log_path, f'training_history_{model_name}.csv')
+    training_history_csv = os.path.join(log_path, f'training_history_{model_name}')
     hist_df.to_csv(training_history_csv, index=False)
     logging.info(f"{model_name} Model trained, Model and training history are saved successfully.")
     return  predictions_results, metrics_summary, model_save_path, training_history_csv
