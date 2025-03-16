@@ -53,7 +53,7 @@ def metrics_score(y_true, y_pred):
 def preprocess_input_vgg19(x):
     return tf.keras.applications.vgg19.preprocess_input(x)
 
-def get_data_generators(train_path, valid_path, test_path, best_params):
+def get_data_generators(train_path, valid_path, test_path, best_params, classes = {'No_Glaucoma': 0, 'Suspected_Glaucoma': 1}):
     train_datagen = ImageDataGenerator(
         preprocessing_function=preprocess_input_vgg19,
         rotation_range=best_params['rotation_range'],
@@ -68,9 +68,7 @@ def get_data_generators(train_path, valid_path, test_path, best_params):
     val_datagen = ImageDataGenerator(preprocessing_function=preprocess_input_vgg19)
     
     test_datagen = ImageDataGenerator(preprocessing_function=preprocess_input_vgg19)
-
-    classes = {'No_Glaucoma': 0, 'Suspected_Glaucoma': 1}
-       
+    
     train_generator = train_datagen.flow_from_directory(
         train_path,
         target_size=(224, 224),
@@ -153,10 +151,9 @@ def evaluate_model(model, model_name, test_generator, output_dir):
 
     return predictions_results, metrics_summary
 
-def evaluate_only(model_path, model_name, test_path, output_dir):
+def evaluate_only(model_path, model_name, test_path, output_dir, classes = {'No_Glaucoma': 0, 'Suspected_Glaucoma': 1}):
     test_datagen = ImageDataGenerator(preprocessing_function=preprocess_input_vgg19)
 
-    classes = {'No_Glaucoma': 0, 'Suspected_Glaucoma': 1}
     model = tf.keras.models.load_model(model_path,
                                        custom_objects={'f1_score_normal': f1_score_normal})
 
@@ -176,6 +173,7 @@ def train_and_evaluate(train_path,
                        eval_path,
                        model_name,
                        best_hyperparameters_json_path = None, 
+                       classes = {'No_Glaucoma': 0, 'Suspected_Glaucoma': 1},
                         ):
 
     logging.basicConfig(level=logging.INFO)
@@ -213,7 +211,7 @@ def train_and_evaluate(train_path,
             best_params = json.load(file)
     
     set_seeds()
-    train_generator, validation_generator, test_generator = get_data_generators(train_path, valid_path, test_path, best_params)
+    train_generator, validation_generator, test_generator = get_data_generators(train_path, valid_path, test_path, best_params, classes)
         
     K.clear_session()
     strategy = tf.distribute.OneDeviceStrategy("/GPU:0")
@@ -286,7 +284,7 @@ def train_and_evaluate(train_path,
         predictions_results, metrics_summary = evaluate_model(model=model, 
                    model_name=model_name, 
                    test_generator=test_generator, 
-                   output_dir=eval_path, 
+                   output_dir=eval_path,
                  )
         
     if model_name:
