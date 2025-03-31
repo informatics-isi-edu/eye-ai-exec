@@ -105,13 +105,13 @@ def save_svg(output_directory, annotation_type_rid, rid, raw_image_size, bbox, a
     '''
 
     svg_file_path = os.path.join(output_directory,
-                                 f"Cropped_{rid}.svg")
+                                 f"Execution_Assets/Image_Annotation/Cropped_{rid}.svg")
     os.makedirs(os.path.dirname(svg_file_path), exist_ok=True)
     with open(svg_file_path, "w") as file:
         file.write(svg_content)
 
 
-def preprocess_and_crop(ds_bag, csv_path, output_csv_path, template_path, output_path, model_path,
+def preprocess_and_crop(directory_path, csv_path, output_csv_path, template_path, output_path, model_path,
                         annotation_type_rid, annotation_type_name, cropped_image):
     model = load_model(model_path)
     # Template creation
@@ -134,6 +134,14 @@ def preprocess_and_crop(ds_bag, csv_path, output_csv_path, template_path, output
     def imgResize_secondary(img):
         img_rs = cv.resize(img, (600, 600))
         return img_rs
+
+    def getImage(directory_path, img_name):
+        full_path = directory_path + img_name
+        image = cv.imread(full_path, -1)
+        if image is None:
+            logging.error("Error: Image could not be read.")
+            return None
+        return image
 
     def kmeansclust(img, k):
         img_rsp = img.reshape((-1, 1))
@@ -177,7 +185,7 @@ def preprocess_and_crop(ds_bag, csv_path, output_csv_path, template_path, output
     #     cropped_im = im[y:y+h, x:x+w]
     #     return cropped_im, x, y  # Return the cropped image and the top-left corner coordinates
 
-    # Function to find the bounding box of the eye on the original imageimage_vocab 
+    # Function to find the bounding box of the eye on the original image
     def find_eye_bbox(im):
         mask = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
         _, mask = cv2.threshold(mask, 10, 255, cv2.THRESH_BINARY)
@@ -191,6 +199,11 @@ def preprocess_and_crop(ds_bag, csv_path, output_csv_path, template_path, output
 
     start_time = time.time()
 
+    if not os.path.exists(directory_path):
+        logging.error(f'Error: Directory {directory_path} does not exist.')
+        exit()
+
+    image_files = os.listdir(directory_path)  # List all files in the directory
     csv_data = pd.read_csv(csv_path)
 
     crop_success = False  # Initialize the flag
@@ -201,10 +214,14 @@ def preprocess_and_crop(ds_bag, csv_path, output_csv_path, template_path, output
 
     for index, row in csv_data.iterrows():
         img_name = row['Filename']
-        rid = row['RID_Image']  #
-        image_vocab = "Cropped"
+        rid = row['RID']  #
+        image_vocab = row['Image_Tag']
 
+        if img_name not in image_files:
+            logging.error(f'Image {img_name} does not exist in directory.')
+            continue
 
+        # img = getImage(directory_path, img_name)
         image_file_path = image_df[image_df['RID'] == rid]['Filename'].values[0]
         img = cv.imread(image_file_path, -1)
    
@@ -214,7 +231,7 @@ def preprocess_and_crop(ds_bag, csv_path, output_csv_path, template_path, output
             
         raw_image_size = {"width": img.shape[1], "height": img.shape[0]}
         resize_functions = [imgResize_primary, imgResize_secondary]  # Put resizing functions in a list
-        for crop_size in range(150, 200, 10):
+        for crop_size in range(95, 116, 10):
             for resize_function in resize_functions:  # Iterate over resizing functions
                 img = crop_to_eye(img)  # First, crop to eye
                 img_rs = resize_function(img)
@@ -269,7 +286,7 @@ def preprocess_and_crop(ds_bag, csv_path, output_csv_path, template_path, output
                     if prediction == "Proper":
 
                         # Get the bounding box of the eye on the original image before resizing
-                        original_image = cv.imread(image_file_path, -1)
+                        original_image = getImage(directory_path, img_name)
                         x, y, w, h = find_eye_bbox(original_image)
 
                         # Calculate the original bounding box coordinates based on the scale
@@ -332,10 +349,8 @@ def preprocess_and_crop(ds_bag, csv_path, output_csv_path, template_path, output
 
             img_rs = crop_to_eye(img)
 
-            # # Get the bounding box of the eye on the original image before resizing
-            # image_file_path = image_df[image_df['RID'] == rid]['Filename'].values[0]
-            original_img = cv.imread(image_file_path, -1)
-            
+            # Get the bounding box of the eye on the original image before resizing
+            original_image = getImage(directory_path, img_name)
             bbox_x, bbox_y, bbox_w, bbox_h = find_eye_bbox(original_image)
 
             if cropped_image:
@@ -386,6 +401,7 @@ def preprocess_and_crop(ds_bag, csv_path, output_csv_path, template_path, output
     results_df.to_csv(output_csv_path, index=False)
 
     logging.info(f"Number of images in CSV: {results_df.shape[0]}")
+    logging.info(f"Number of images in directory: {len(image_files)}")
     logging.info(f"Number of images in output directory: {len(os.listdir(output_path))}")
     logging.info(f"Number of cropped images: {len(results_data)}")
 
