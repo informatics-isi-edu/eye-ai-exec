@@ -11,6 +11,7 @@ from sklearn.metrics import confusion_matrix
 from sklearn.preprocessing import StandardScaler
 from deriva_ml import DatasetBag
 from eye_ai.eye_ai import EyeAI
+from feature_engine.encoding import OneHotEncoder
 
 
 class Severity(EyeAI):
@@ -19,8 +20,11 @@ class Severity(EyeAI):
 
     def __init__(
         self,
+        hostname = 'www.eye-ai.org',
+        catalog_id = "eye-ai",
         cache_dir: str = "/data",
         working_dir: str = None,
+        method="chart_label"
     ):
         """
         Initializes the EyeAI object.
@@ -31,6 +35,8 @@ class Severity(EyeAI):
         """
 
         super().__init__(
+            hostname=hostname,
+            catalog_id=catalog_id,
             cache_dir=cache_dir,
             working_dir=working_dir,
         )
@@ -40,7 +46,7 @@ class Severity(EyeAI):
         Plot Receiver Operating Characteristic (ROC) curve based on prediction results. Save the plot values into a csv file.
 
         Parameters:
-        - data (pd.DataFrame): DataFrame containing prediction results with columns 'True Condition_Condition_Condition_Condition_Label' and
+        - data (pd.DataFrame): DataFrame containing prediction results with columns 'True Condition_Label' and
         'Probability Score'.
         Returns:
             Path: Path to the saved csv file of ROC plot values .
@@ -183,6 +189,21 @@ class Severity(EyeAI):
             ["POAG", "PACG"], "Glaucoma"
         )
 
+        ### ICD10 as a fx_col -- need to drop rows missing ICD10 before creating y
+        if "ICD10_label_full" in fx_cols:
+            # drop rows missing label (ie no label for POAG vs PACG vs GS)
+            multimodal_wide = multimodal_wide.dropna(subset=["ICD10_label_full"])
+            # drop rows where label is "Other" (should only be PACG, POAG, or GS)
+            allowed_labels = ["PACG", "POAG", "GS"]
+            multimodal_wide = multimodal_wide[
+                multimodal_wide["ICD10_label_full"].isin(allowed_labels)
+            ]
+    
+            # combine PACG and POAG as glaucoma
+            multimodal_wide["ICD10_label_full"] = multimodal_wide["ICD10_label_full"].replace(
+                ["POAG", "PACG"], "Glaucoma"
+            )
+
         if y_method == "all_glaucoma":
             y = multimodal_wide.combined_label  # Target variable
         elif y_method == "urgent_glaucoma":
@@ -248,6 +269,7 @@ class Severity(EyeAI):
         ### transform X ###
         x = multimodal_wide[fx_cols]  # Features
 
+
         ### GHT: reformat as "Outside Normal Limits", "Within Normal Limits", "Borderline", "Other"
         if "GHT" in fx_cols:
             ght_categories = [
@@ -267,10 +289,8 @@ class Severity(EyeAI):
             )
 
         ### categorical data: encode using OneHotEncoder
-        from feature_engine.encoding import OneHotEncoder
-
         categorical_vars = list(
-            set(fx_cols) & {"Subject_Gender", "Subject_Ethnicity", "GHT"}
+            set(fx_cols) & {"Subject_Gender", "Subject_Ethnicity", "GHT", "ICD10_label_full"}
         )  # cateogorical vars that exist
 
         if len(categorical_vars) > 0:
@@ -382,28 +402,28 @@ class Severity(EyeAI):
 
     def standardize_data(self, fx_cols, x_train, x_test):
         # identify categorical vs numeric columns
-        categorical_vars = ["Subject_Gender", "Subject_Ethnicity", "GHT"]
+        categorical_vars = ["Subject_Gender", "Subject_Ethnicity", "GHT", "ICD10_label_full"]
         numeric_vars = sorted(set(fx_cols) - set(categorical_vars), key=fx_cols.index)
-
-        scaler = StandardScaler()
-
-        # normalize numeric columns for X_train
-        normalized_numeric_x_train = pd.DataFrame(
-            scaler.fit_transform(x_train[numeric_vars]), columns=numeric_vars
-        )
-        cat_df = x_train.drop(numeric_vars, axis=1)
-        x_train = pd.concat(
-            [normalized_numeric_x_train.set_index(cat_df.index), cat_df], axis=1
-        )
-
-        # normalize numeric columsn for X_test, but using scaler fitted to training data to prevent data leakage
-        normalized_numeric_x_test = pd.DataFrame(
-            scaler.transform(x_test[numeric_vars]), columns=numeric_vars
-        )
-        cat_df = x_test.drop(numeric_vars, axis=1)
-        x_test = pd.concat(
-            [normalized_numeric_x_test.set_index(cat_df.index), cat_df], axis=1
-        )
+        if len(numeric_vars)>0:
+            scaler = StandardScaler()
+    
+            # normalize numeric columns for X_train
+            normalized_numeric_x_train = pd.DataFrame(
+                scaler.fit_transform(x_train[numeric_vars]), columns=numeric_vars
+            )
+            cat_df = x_train.drop(numeric_vars, axis=1)
+            x_train = pd.concat(
+                [normalized_numeric_x_train.set_index(cat_df.index), cat_df], axis=1
+            )
+    
+            # normalize numeric columsn for X_test, but using scaler fitted to training data to prevent data leakage
+            normalized_numeric_x_test = pd.DataFrame(
+                scaler.transform(x_test[numeric_vars]), columns=numeric_vars
+            )
+            cat_df = x_test.drop(numeric_vars, axis=1)
+            x_test = pd.concat(
+                [normalized_numeric_x_test.set_index(cat_df.index), cat_df], axis=1
+            )
 
         return x_train, x_test
 
@@ -619,8 +639,7 @@ class Severity(EyeAI):
         y_pred_proba = model.predict_proba(x_test)[::, 1]
         fpr, tpr, thresholds = metrics.roc_curve(y_test, y_pred_proba)
         auc = metrics.roc_auc_score(y_test, y_pred_proba)
-        auc_formatted = "%.3f" % auc
-        print("AUC: %s" % auc_formatted)
+        print("AUC: %.3f" % auc)
 
         # Youden's J index = sens + spec - 1 = tpr + (1-fpr) -1 = tpr - fpr
         optimal_idx = np.argmax(tpr - fpr)
@@ -652,7 +671,7 @@ class Severity(EyeAI):
             plt.show()
 
             # ROC curve plot with optimal threshold
-            plt.plot(fpr, tpr, label="AUC=%s, Youden's=%.3f" % (auc_formatted, youdens))
+            plt.plot(fpr, tpr, label="AUC=%.3f, Youden's=%.3f" % (auc, youdens))
             plt.xlabel("False positive rate (1-specificity)")
             plt.ylabel("True positive rate (sensitivity)")
             plt.title("ROC Curve")
@@ -666,7 +685,7 @@ class Severity(EyeAI):
             )
             plt.legend(loc=4)
             plt.show()
-        return fpr, tpr, auc_formatted, optimal_idx, optimal_threshold
+        return fpr, tpr, auc, optimal_idx, optimal_threshold
 
     #####Multiple Imputation Logistic Regression analysis methods#####
     ### After performing logistic regression on each imputed dataset, pool the results using Rubin’s rules to obtain a single set of estimates.
