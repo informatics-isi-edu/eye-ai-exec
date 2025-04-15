@@ -110,8 +110,13 @@ def evaluate_model(model, model_name, test_generator, output_dir):
   
         batch_data = test_generator[i]
         image_batch, label_batch = batch_data[0], batch_data[1]
-        batch_filenames = test_generator.filenames[
-                          i * test_generator.batch_size: (i + 1) * test_generator.batch_size]
+        
+        current_batch_size = image_batch.shape[0]
+
+        # Safely slice filenames
+        start_idx = i * test_generator.batch_size
+        end_idx = start_idx + current_batch_size
+        batch_filenames = test_generator.filenames[start_idx:end_idx]
         
         predictions = model.predict_on_batch(image_batch).flatten()
 
