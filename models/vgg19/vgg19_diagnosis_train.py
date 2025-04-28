@@ -20,6 +20,7 @@ from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam, SGD, RMSprop
 from tensorflow.keras.losses import BinaryCrossentropy, Hinge, SquaredHinge, LogCosh
 from tensorflow.keras.metrics import AUC, Accuracy, Precision, Recall, BinaryAccuracy
+from tensorflow.keras.preprocessing import image
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras import backend as K
 from tensorflow.keras.callbacks import EarlyStopping
@@ -54,7 +55,7 @@ def preprocess_input_vgg19(x):
     return tf.keras.applications.vgg19.preprocess_input(x)
 
 def get_data_generators(train_path, valid_path, test_path, best_params, classes = {'No_Glaucoma': 0, 'Suspected_Glaucoma': 1}):
-    train_datagen = ImageDataGenerator(
+    train_datagen = image.ImageDataGenerator(
         preprocessing_function=preprocess_input_vgg19,
         rotation_range=best_params['rotation_range'],
         width_shift_range=best_params['width_shift_range'],
@@ -65,9 +66,9 @@ def get_data_generators(train_path, valid_path, test_path, best_params, classes 
         brightness_range=[1 - best_params['brightness_range'], 1 + best_params['brightness_range']] if best_params['brightness_range'] != 0 else None
     )
     
-    val_datagen = ImageDataGenerator(preprocessing_function=preprocess_input_vgg19)
+    val_datagen = image.ImageDataGenerator(preprocessing_function=preprocess_input_vgg19)
     
-    test_datagen = ImageDataGenerator(preprocessing_function=preprocess_input_vgg19)
+    test_datagen = image.ImageDataGenerator(preprocessing_function=preprocess_input_vgg19)
     
     train_generator = train_datagen.flow_from_directory(
         train_path,
@@ -107,17 +108,16 @@ def evaluate_model(model, model_name, test_generator, output_dir):
     y_pred = []
     scores = []
 
+    ptr = 0
+
     for i in range(len(test_generator)):
   
         batch_data = test_generator[i]
         image_batch, label_batch = batch_data[0], batch_data[1]
-        
-        current_batch_size = image_batch.shape[0]
+        curr_batch_size = image_batch.shape[0]
 
-        # Safely slice filenames
-        start_idx = i * test_generator.batch_size
-        end_idx = start_idx + current_batch_size
-        batch_filenames = test_generator.filenames[start_idx:end_idx]
+        batch_filenames = test_generator.filenames[ptr : ptr + curr_batch_size]
+        ptr += curr_batch_size
         
         predictions = model.predict_on_batch(image_batch).flatten()
 
@@ -135,8 +135,8 @@ def evaluate_model(model, model_name, test_generator, output_dir):
 
     # Write to CSV file
     output_dir.mkdir(parents=True, exist_ok=True)
-    predictions_results  = output_dir / f"{model_name}_predictions_results"
-    metrics_summary = output_dir / f"{model_name}_metrics_summary"
+    predictions_results  = output_dir / f"{model_name}_predictions_results.csv"
+    metrics_summary = output_dir / f"{model_name}_metrics_summary.csv"
     with open(predictions_results, 'w', newline='') as file:
         writer = csv.writer(file)
         writer.writerow(['Filename', 'True Label', 'Prediction', 'Probability Score'])
@@ -158,7 +158,7 @@ def evaluate_model(model, model_name, test_generator, output_dir):
     return predictions_results, metrics_summary
 
 def evaluate_only(model_path, model_name, test_path, output_dir, classes = {'No_Glaucoma': 0, 'Suspected_Glaucoma': 1}):
-    test_datagen = ImageDataGenerator(preprocessing_function=preprocess_input_vgg19)
+    test_datagen = image.ImageDataGenerator(preprocessing_function=preprocess_input_vgg19)
 
     model = tf.keras.models.load_model(model_path,
                                        custom_objects={'f1_score_normal': f1_score_normal})
@@ -167,7 +167,8 @@ def evaluate_only(model_path, model_name, test_path, output_dir, classes = {'No_
         test_path,
         target_size=(224, 224),
         class_mode='binary',
-        classes = classes
+        classes = classes,
+        shuffle = False,
     )
     return evaluate_model(model, model_name, test_generator, output_dir)
 
@@ -304,6 +305,21 @@ def train_and_evaluate(train_path,
     hist_df.to_csv(training_history_csv, index=False)
     logging.info(f"{model_name} Model trained, Model and training history are saved successfully.")
     return  predictions_results, metrics_summary, model_save_path, training_history_csv
+
+def predict_single_image(img_path, model_path, classes={'No_Glaucoma': 0, 'Suspected_Glaucoma': 1}):
+    model = tf.keras.models.load_model(model_path,custom_objects={'f1_score_normal': f1_score_normal})
+    img = image.load_img(img_path, target_size=(224, 224))
+    img_array = image.img_to_array(img)
+    img_array = np.expand_dims(img_array, axis=0)
+    img_array = preprocess_input_vgg19(img_array)
+
+    prediction = model.predict(img_array).flatten()[0]
+    predicted_class = int(prediction > 0.5)
+    class_label_map = {v: k for k, v in classes.items()}
+
+    print("Model predicted: ", class_label_map[predicted_class])
+    return  class_label_map[predicted_class]
+
 
 def main(train_path, valid_path, test_path, model_path, log_path, eval_path,best_hyperparameters_json_path, model_name):
     logging.basicConfig(level=logging.INFO)
