@@ -87,7 +87,8 @@ def get_data_generators(train_path, valid_path, test_path, best_params, classes 
         test_path,
         target_size=(224, 224),
         class_mode='binary',
-        classes = classes
+        classes = classes,
+        shuffle = False,
     )
 
     print("train path: ", train_path)
