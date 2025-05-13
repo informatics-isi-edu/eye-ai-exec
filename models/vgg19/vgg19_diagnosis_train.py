@@ -8,6 +8,7 @@ from pathlib import Path, PurePath
 import logging
 import json
 import csv
+import ast
 
 import pandas as pd
 from sklearn.utils import class_weight
@@ -88,8 +89,7 @@ def get_data_generators(train_path, valid_path, test_path, best_params, classes 
         test_path,
         target_size=(224, 224),
         class_mode='binary',
-        classes = classes,
-        shuffle = False,
+        classes = classes
     )
 
     print("train path: ", train_path)
@@ -133,6 +133,11 @@ def evaluate_model(model, model_name, test_generator, output_dir):
     
     f1_val, recall, precision, accuracy = metrics_score(y_true, y_pred)
 
+    try:
+        roc_auc = roc_auc_score(y_true, scores)
+    except ValueError:
+        roc_auc = None 
+
     # Write to CSV file
     output_dir.mkdir(parents=True, exist_ok=True)
     predictions_results  = output_dir / f"{model_name}_predictions_results.csv"
@@ -151,6 +156,10 @@ def evaluate_model(model, model_name, test_generator, output_dir):
         writer.writerow(['Precision', precision])
         writer.writerow(['Recall', recall])
         writer.writerow(['Accuracy', accuracy])
+        if roc_auc is not None:
+            writer.writerow(['ROC-AUC', roc_auc])
+        else:
+            writer.writerow(['ROC-AUC', 'Undefined (only one class)'])
 
     logging.info(f"Predictions saved to {model_name}_predictions_results.csv")
     logging.info(f"Metrics saved to {model_name}_metrics_summary.csv")
@@ -301,7 +310,7 @@ def train_and_evaluate(train_path,
     model.save(model_save_path)
 
     hist_df = pd.DataFrame(training_log.history) 
-    training_history_csv = os.path.join(log_path, f'training_history_{model_name}')
+    training_history_csv = os.path.join(log_path, f'training_history_{model_name}.csv')
     hist_df.to_csv(training_history_csv, index=False)
     logging.info(f"{model_name} Model trained, Model and training history are saved successfully.")
     return  predictions_results, metrics_summary, model_save_path, training_history_csv
@@ -321,21 +330,80 @@ def predict_single_image(img_path, model_path, classes={'No_Glaucoma': 0, 'Suspe
     return  class_label_map[predicted_class]
 
 
-def main(train_path, valid_path, test_path, model_path, log_path, eval_path,best_hyperparameters_json_path, model_name):
-    logging.basicConfig(level=logging.INFO)
-    
-    with open(best_hyperparameters_json_path, 'r') as file:
-        best_params = json.load(file)
-
-    train_and_evaluate(train_path, valid_path, test_path, model_path, log_path, eval_path,best_hyperparameters_json_path, model_name)
-
-if __name__ == '__main__':
+def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--train_path', type=str, required=True, help='Path to the training images')
-    parser.add_argument('--valid_path', type=str, required=True, help='Path to the validation images')
-    parser.add_argument('--test_path', type=str, required=True, help='Path to the test images')
-    parser.add_argument('--output_path', type=str, required=True, help='Path where the trained model should be saved')
-    parser.add_argument('--best_hyperparameters_json_path', type=str, required=True, help='Path to the JSON file with best hyperparameters')
-    parser.add_argument('--model_name', type=str, required=True, help='Name of the Trained model with best hyperparameters')
+    parser.add_argument('--mode', type=str, required=True, choices=['train', 'evaluate', 'predict'], help='Operation mode')
+    parser.add_argument('--model_path', type=str,  help='Path to load or save model')
+    parser.add_argument('--model_name', type=str, help='Model name for saving or loading')
+    parser.add_argument('--train_path', type=str, help='Path to training images')
+    parser.add_argument('--valid_path', type=str, help='Path to validation images')
+    parser.add_argument('--test_path', type=str, help='Path to test images')
+    parser.add_argument('--log_path', type=str, help='Path to save training logs')
+    parser.add_argument('--eval_path', type=str, help='Path to save evaluation results')
+    parser.add_argument('--hyperparameters_json_path', required=False, default=None, type=str, help='Path to hyperparameters JSON')
+    parser.add_argument('--image_path', type=str, help='Path to a single image for prediction')
+    parser.add_argument('--classes_definition', type=str, required=False, default=None, help='A dictionary of classes definition')
+
     args = parser.parse_args()
-    main(args.train_path, args.valid_path, args.test_path, args.output_path, args.best_hyperparameters_json_path)
+
+    if args.classes_definition:
+        try:
+            args.classes_definition = ast.literal_eval(args.classes_definition)
+            if not isinstance(args.classes_definition, dict):
+                print("Classes definition has to be a dictionary, e.g. {'No_Glaucoma': 0, 'Suspected_Glaucoma': 1}")
+                args.classes_definition = None  
+        except Exception as e:
+            print("Classes definition has to be a dictionary, e.g. {'No_Glaucoma': 0, 'Suspected_Glaucoma': 1}")
+            args.classes_definition = None 
+    else:
+        args.classes_definition = None
+
+    logging.basicConfig(level=logging.INFO)
+
+    if args.mode == 'train':
+        required_args = ['train_path', 'valid_path', 'test_path', 'log_path', 'eval_path', 'model_name']
+        missing_args = [arg for arg in required_args if getattr(args, arg) is None]
+        if missing_args:
+            parser.error(f"Missing required arguments for training: {', '.join(missing_args)}")
+            
+        return train_and_evaluate(
+            train_path=args.train_path,
+            valid_path=args.valid_path,
+            test_path=args.test_path,
+            model_path=args.model_path,
+            log_path=args.log_path,
+            eval_path=args.eval_path,
+            model_name=args.model_name,
+            best_hyperparameters_json_path=args.hyperparameters_json_path,
+            classes= args.classes_definition
+        )
+
+    elif args.mode == 'evaluate':
+        required_args = ['model_name', 'model_path', 'test_path', 'eval_path']
+        missing_args = [arg for arg in required_args if getattr(args, arg) is None]
+        if missing_args:
+            parser.error(f"Missing required arguments for prediction: {', '.join(missing_args)}")
+
+        return evaluate_only(
+            model_path=args.model_path,
+            model_name=args.model_name,
+            test_path=args.test_path,
+            output_dir=Path(args.eval_path),
+            classes = ast.literal_eval(args.classes_definition)
+        )
+
+    elif args.mode == 'predict':
+        required_args = ['image_path', 'model_path']
+        missing_args = [arg for arg in required_args if getattr(args, arg) is None]
+        if missing_args:
+            parser.error(f"Missing required arguments for prediction: {', '.join(missing_args)}")
+            
+        return  predict_single_image(
+            img_path=args.image_path,
+            model_path=args.model_path,
+            classes= ast.literal_eval(args.classes_definition)
+        )
+   
+    
+if __name__ == '__main__':
+    main()
