@@ -316,6 +316,7 @@ def train_and_evaluate(train_path,
     return  predictions_results, metrics_summary, model_save_path, training_history_csv
 
 def predict_single_image(img_path, model_path, classes={'No_Glaucoma': 0, 'Suspected_Glaucoma': 1}):
+    tf.keras.backend.clear_session()
     model = tf.keras.models.load_model(model_path,custom_objects={'f1_score_normal': f1_score_normal})
     img = image.load_img(img_path, target_size=(224, 224))
     img_array = image.img_to_array(img)
