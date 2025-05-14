@@ -389,7 +389,7 @@ def main():
             model_name=args.model_name,
             test_path=args.test_path,
             output_dir=Path(args.eval_path),
-            classes = ast.literal_eval(args.classes_definition)
+            classes = args.classes_definition
         )
 
     elif args.mode == 'predict':
