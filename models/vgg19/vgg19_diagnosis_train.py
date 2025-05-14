@@ -401,7 +401,7 @@ def main():
         return  predict_single_image(
             img_path=args.image_path,
             model_path=args.model_path,
-            classes= ast.literal_eval(args.classes_definition)
+            classes= args.classes_definition
         )
    
     
