@@ -9,6 +9,7 @@ from scipy.stats import norm
 import sklearn.metrics as metrics
 from sklearn.metrics import confusion_matrix
 from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
 from deriva_ml import DatasetBag
 from eye_ai.eye_ai import EyeAI
 from feature_engine.encoding import OneHotEncoder
@@ -71,6 +72,9 @@ class Severity(EyeAI):
 
     def severity_analysis(self, ds_bag: DatasetBag):
         wide = self.multimodal_wide(ds_bag)
+
+        # replace all empty strings with np.nan
+        wide = wide.mask(wide == '')
 
         def compare_sides_severity(
             group, value_col, new_col, smaller=True
@@ -243,6 +247,15 @@ class Severity(EyeAI):
                 ),
                 axis=1,
             )
+        elif y_method == "urgent_glaucoma_nosuspect":
+            # drop rows missing MD
+            multimodal_wide = multimodal_wide.dropna(subset=["MD"])
+            
+            # drop rows with suspects
+            multimodal_wide = multimodal_wide[~(multimodal_wide["combined_label"] == "GS")]
+
+            y = multimodal_wide['MD'].apply(
+                lambda x: "mod-severe" if x <= -6 else "mild")
         elif y_method == "MD_only":
             # drop rows missing MD
             multimodal_wide = multimodal_wide.dropna(subset=["MD"])
@@ -416,7 +429,7 @@ class Severity(EyeAI):
                 [normalized_numeric_x_train.set_index(cat_df.index), cat_df], axis=1
             )
     
-            # normalize numeric columsn for X_test, but using scaler fitted to training data to prevent data leakage
+            # normalize numeric columns for X_test, but using scaler fitted to training data to prevent data leakage
             normalized_numeric_x_test = pd.DataFrame(
                 scaler.transform(x_test[numeric_vars]), columns=numeric_vars
             )
@@ -515,7 +528,10 @@ class Severity(EyeAI):
         return func(decimals)
 
     # print model coefficients, ORs, p-values
-    def model_summary(self, model, x_train, format_dec=True):
+    def model_summary(self, model, x_train, x_train_orig=None, format_dec=True):
+        model_fx = x_train.columns.tolist()
+        print("Model features: %s" % model_fx)
+        
         print("Training set: %i" % len(x_train))
         coefs = model.coef_[0]
         # odd ratios = e^coef
@@ -552,6 +568,18 @@ class Severity(EyeAI):
             )
         print(results)
         print("")
+        
+        univariate_fx = model_fx[0]
+        if (x_train_orig is not None) and (univariate_fx in x_train_orig.columns.tolist()):
+            # WORKS FOR UNIVARIATE ANALYSES ONLY: Compute cutoff value of predictive variable that corresponds with prediction probability of 0.5
+            x_cutoff = -intercept / model.coef_[0][0] # standardized value
+
+            # unstandardize and get back to raw value: 
+            mean_val = x_train_orig[univariate_fx].mean()
+            std_val = x_train_orig[univariate_fx].std(ddof=0)  # match sklearn's default (population std)
+            x_cutoff_raw = x_cutoff * std_val + mean_val
+            print(f"VALID ONLY FOR UNIVARIATE ANALYSES: Cutoff value of x to predict y=1 at 0.5 threshold: {x_cutoff_raw}")
+            print("")
 
     # model performance
     # https://medium.com/javarevisited/evaluating-the-logistic-regression-ae2decf42d61
@@ -634,7 +662,6 @@ class Severity(EyeAI):
     # output performance stats corresponding to OPTIMAL prediction probability cutoff per Youden's, instead of per 0.5 cutoff
     # plot_auc = True: plot individual AUC plot. If False, save to plot onto combined plot later
     def compute_performance_youden(self, model, x_test, y_test, plot=True):
-        print("Model features: %s" % x_test.columns.tolist())
         # AUC
         y_pred_proba = model.predict_proba(x_test)[::, 1]
         fpr, tpr, thresholds = metrics.roc_curve(y_test, y_pred_proba)
@@ -829,3 +856,168 @@ class Severity(EyeAI):
         plt.ylabel("True positive rate (sensitivity)")
         plt.legend(loc=4)
         plt.show()
+
+    def run_whole_analysis(self, list_of_fx_cols_to_run, wide_train, wide_test, y_method="all_glaucoma"):
+        models = {} # model label name: (model, associated X_test, associated y_test)
+
+        for key, fx_cols in list_of_fx_cols_to_run.items():
+            #### 1. Transform train and test data ####
+            X_train, y_train = self.transform_data(wide_train, fx_cols, y_method=y_method)
+            X_test, y_test = self.transform_data(wide_test, fx_cols, y_method=y_method)
+            
+            
+            #### 2. Standardize data ####
+            # #### may not be required for univariate analysis to improve interpretability (but still good to center/scale to improve Gaussian-ness of distribution)
+            
+            ### normalize numeric training data (so that features are on same scale instead of wildly different scales)
+            # not required for typical logistic regression, but do need for regularized regression
+            # I didn't put this in transform_data because I want to use the scaler fitted on train for test too
+            
+            # how? https://datascience.stackexchange.com/questions/54908/data-normalization-before-or-after-train-test-split
+            # why? https://stackoverflow.com/questions/52670012/convergencewarning-liblinear-failed-to-converge-increase-the-number-of-iterati
+            
+            X_train_std, X_test_std = self.standardize_data(fx_cols, X_train, X_test)
+
+            if key=='for_counts_only': # only relevant for urgent glaucoma analysis; if "for_counts_only" not provided as an option, then uses ALL for stats
+                X_train_overall = X_train
+                X_test_overall = X_test
+                y_train_overall = y_train
+                y_test_overall = y_test
+
+                print ("X___overall dats set by for_counts_only")
+                continue # exit and don't compute anything for this key
+    
+            # multivariate simple logistic regression
+            logreg, x_t, y_t = self.multivariate_logreg(fx_cols, X_train_std, X_test_std, y_train, y_test)
+    
+            models[key] = (logreg, x_t, y_t)
+    
+            if key=='ALL':
+                models_univariate = self.univariate_analysis(fx_cols, X_train_std, X_train, X_test_std, y_train, y_test)
+                models = {**models, **models_univariate}
+                ridge_cv, en_cv, x_t, y_t = self.multivariate_ridge_elastic(fx_cols, X_train_std, X_test_std, y_train, y_test)
+                models["ML Ridge"] = (ridge_cv, x_t, y_t)
+                models["ML Elastic Net"] = (en_cv, x_t, y_t)
+
+                if "for_counts_only" not in list_of_fx_cols_to_run.keys():
+                    X_train_overall = X_train
+                    X_test_overall = X_test
+                    y_train_overall = y_train
+                    y_test_overall = y_test
+    
+        return models, X_train_overall, X_test_overall, y_train_overall, y_test_overall
+            
+    
+    def univariate_analysis(self, fx_cols, X_train, x_train_orig, X_test, y_train, y_test, drop_NA=True):
+        print("-------------------------------------------UNIVARIATE ANALYSIS---------------------------------------------------------------")
+        # Iterate through all feature columns
+        # (code isn't all that different from the simple one below, I just wanted to use loop instead of doing by hand)
+        
+        # MUST DROP REFERENCE COLUMN FOR ONE-HOT-ENCODED VARIABLES
+        chosen_ref_labels = ['GHT_Within Normal Limits', 'Subject_Gender_M', 'Subject_Ethnicity_Other']
+        drop_cols = [x for x in X_train.columns if x in chosen_ref_labels]
+        X_train = X_train.drop(columns=drop_cols)
+        X_test = X_test.drop(columns=drop_cols)
+        
+        penalty=None#'l1', 'l2', 'elasticnet', or None
+        solver='saga' # 'lbfgs', 'saga' (only saga supports l1 and elasticnet)
+        
+        # save models in dict to access later
+        models_univariate = {} # model label name: (model, associated X_test, associated y_test)
+        
+        def process_fx(fx, X, X_t, Y, Y_t):
+            logreg = LogisticRegression(random_state=16, solver=solver, max_iter=1000, penalty=penalty)
+        
+            print(fx)
+            # select all columns that contain fx (because of categorical vars)
+            cols = [col for col in X.columns if fx in col]
+            x = X[cols]
+            x_t = X_t[cols]
+        
+            if drop_NA:
+                # Drop NA if desired
+                x = x.dropna()
+                x_t = x_t.dropna()
+        
+                y = Y[Y.index.isin(x.index)]
+                y_t = Y_t[Y_t.index.isin(x_t.index)]
+            
+            # fit the model with data
+            logreg.fit(x, y)
+            self.model_summary(logreg, x, x_train_orig)
+            self.compute_performance(logreg, x_t, y_t)
+            self.compute_performance_youden(logreg, x_t, y_t)
+            return logreg, x_t, y_t
+            print("")
+        
+        # fx_cols = demographic_fx + clinic_fx + HVF_fx + RNFL_fx + RNFL_IS_fx + GHT -- must have set this in fx_cols at top before transforming data
+        for fx in fx_cols:
+            models_univariate[fx] = process_fx(fx, X_train, X_test, y_train, y_test)
+            print("----------------------------------------------------------------------------------------------------------")
+            print("----------------------------------------------------------------------------------------------------------")
+    
+        return models_univariate
+    
+    def multivariate_logreg(self, fx_cols, X_train, X_test, y_train, y_test):
+        # MUST DROP REFERENCE COLUMN FOR ONE-HOT-ENCODED VARIABLES (AVOID DUMMY VARIABLE TRAP)
+        #chosen_ref_labels = ['GHT_Within Normal Limits', 'Subject_Gender_M', 'Subject_Ethnicity_Other']
+        chosen_ref_labels = ['GHT_Within Normal Limits','GHT_Borderline', 'Subject_Gender_M', 'Subject_Ethnicity_Other', 'ICD10_label_full_GS'] 
+        drop_cols = [x for x in X_train.columns if x in chosen_ref_labels]
+        X_train = X_train.drop(columns=drop_cols)
+        X_test = X_test.drop(columns=drop_cols)
+        
+        penalty=None#'l1', 'l2', 'elasticnet', or None
+        solver='saga' # 'lbfgs', 'saga' (only saga supports l1 and elasticnet)
+        
+        logreg = LogisticRegression(random_state=16, solver=solver, max_iter=1000, penalty=penalty) 
+        
+        # fit the model with data
+        logreg.fit(X_train, y_train)
+        self.model_summary(logreg, X_train)
+        self.compute_performance(logreg, X_test, y_test)
+        self.compute_performance_youden(logreg, X_test, y_test)
+    
+        return logreg, X_test, y_test
+    
+    def multivariate_ridge_elastic(self, fx_cols, X_train, X_test, y_train, y_test):
+        #### Regularization params
+        k_folds = 10 #5-10 standard
+        scoring = 'roc_auc' # 'neg_log_loss', 'neg_brier_score', 'accuracy' (default), 'roc_auc', 'neg_mean_absolute_error' ...options on sklearn.metrics: https://scikit-learn.org/stable/api/sklearn.metrics.html#module-sklearn.metrics
+        max_iter=1000
+        solver='saga'
+        # for elastic net only:
+        lambda_inverse = 20  # of C's (=inverse of lambda) to try; 10 by default
+        alpha_range = np.linspace(0, 1, 20)
+    
+        # 1) Ridge
+        print("-------------------------------------------RIDGE---------------------------------------------------------------")
+        ridge_cv = LogisticRegressionCV(cv=k_folds, scoring=scoring, solver=solver, max_iter=max_iter)
+        ridge_cv.fit(X_train, y_train)
+        # Retrieve the best hyperparameters
+        best_C = ridge_cv.C_[0]
+        print(f"Best C (inverse of regularization strength): {best_C}")
+        
+        self.model_summary(ridge_cv, X_train)
+        self.compute_performance(ridge_cv, X_test, y_test)
+        self.compute_performance_youden(ridge_cv, X_test, y_test)
+        
+        # 2) Elastic Net
+        print("-------------------------------------------ELASTIC NET---------------------------------------------------------------")
+        #https://stackoverflow.com/questions/66787845/how-to-perform-elastic-net-for-a-classification-problem
+        # SAGA should be considered more advanced and used over SAG. For more information, see: https://stackoverflow.com/questions/38640109/logistic-regression-python-solvers-defintions
+        en_cv = LogisticRegressionCV(cv=k_folds, scoring=scoring, penalty='elasticnet', Cs = lambda_inverse, l1_ratios=alpha_range, solver=solver, max_iter=max_iter)
+        en_cv.fit(X_train, y_train)
+        
+        # Retrieve the best hyperparameters
+        best_C = en_cv.C_[0]
+        best_l1_ratio = en_cv.l1_ratio_[0]
+        
+        print(f"Best C (inverse of regularization strength): {best_C}")
+        print(f"Best l1_ratio (mixing parameter): {best_l1_ratio}")
+        self.model_summary(en_cv, X_train)
+        self.compute_performance(en_cv, X_test, y_test)
+        self.compute_performance_youden(en_cv, X_test, y_test)
+    
+        return ridge_cv, en_cv, X_test, y_test
+
+    
