@@ -8,6 +8,7 @@ from pathlib import Path, PurePath
 import logging
 import json
 import csv
+import ast
 
 import pandas as pd
 from sklearn.utils import class_weight
@@ -20,6 +21,7 @@ from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam, SGD, RMSprop
 from tensorflow.keras.losses import BinaryCrossentropy, Hinge, SquaredHinge, LogCosh
 from tensorflow.keras.metrics import AUC, Accuracy, Precision, Recall, BinaryAccuracy
+from tensorflow.keras.preprocessing import image
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras import backend as K
 from tensorflow.keras.callbacks import EarlyStopping
@@ -53,8 +55,10 @@ def metrics_score(y_true, y_pred):
 def preprocess_input_vgg19(x):
     return tf.keras.applications.vgg19.preprocess_input(x)
 
-def get_data_generators(train_path, valid_path, test_path, best_params, classes = {'No_Glaucoma': 0, 'Suspected_Glaucoma': 1}):
-    train_datagen = ImageDataGenerator(
+def get_data_generators(train_path, valid_path, test_path, best_params, classes):
+    if not classes:
+        classes = {'No_Glaucoma': 0, 'Suspected_Glaucoma': 1}
+    train_datagen = image.ImageDataGenerator(
         preprocessing_function=preprocess_input_vgg19,
         rotation_range=best_params['rotation_range'],
         width_shift_range=best_params['width_shift_range'],
@@ -65,9 +69,9 @@ def get_data_generators(train_path, valid_path, test_path, best_params, classes 
         brightness_range=[1 - best_params['brightness_range'], 1 + best_params['brightness_range']] if best_params['brightness_range'] != 0 else None
     )
     
-    val_datagen = ImageDataGenerator(preprocessing_function=preprocess_input_vgg19)
+    val_datagen = image.ImageDataGenerator(preprocessing_function=preprocess_input_vgg19)
     
-    test_datagen = ImageDataGenerator(preprocessing_function=preprocess_input_vgg19)
+    test_datagen = image.ImageDataGenerator(preprocessing_function=preprocess_input_vgg19)
     
     train_generator = train_datagen.flow_from_directory(
         train_path,
@@ -106,12 +110,16 @@ def evaluate_model(model, model_name, test_generator, output_dir):
     y_pred = []
     scores = []
 
+    ptr = 0
+
     for i in range(len(test_generator)):
   
         batch_data = test_generator[i]
         image_batch, label_batch = batch_data[0], batch_data[1]
-        batch_filenames = test_generator.filenames[
-                          i * test_generator.batch_size: (i + 1) * test_generator.batch_size]
+        curr_batch_size = image_batch.shape[0]
+
+        batch_filenames = test_generator.filenames[ptr : ptr + curr_batch_size]
+        ptr += curr_batch_size
         
         predictions = model.predict_on_batch(image_batch).flatten()
 
@@ -127,10 +135,15 @@ def evaluate_model(model, model_name, test_generator, output_dir):
     
     f1_val, recall, precision, accuracy = metrics_score(y_true, y_pred)
 
+    try:
+        roc_auc = roc_auc_score(y_true, scores)
+    except ValueError:
+        roc_auc = None 
+
     # Write to CSV file
     output_dir.mkdir(parents=True, exist_ok=True)
-    predictions_results  = output_dir / f"{model_name}_predictions_results"
-    metrics_summary = output_dir / f"{model_name}_metrics_summary"
+    predictions_results  = output_dir / f"{model_name}_predictions_results.csv"
+    metrics_summary = output_dir / f"{model_name}_metrics_summary.csv"
     with open(predictions_results, 'w', newline='') as file:
         writer = csv.writer(file)
         writer.writerow(['Filename', 'True Label', 'Prediction', 'Probability Score'])
@@ -145,14 +158,20 @@ def evaluate_model(model, model_name, test_generator, output_dir):
         writer.writerow(['Precision', precision])
         writer.writerow(['Recall', recall])
         writer.writerow(['Accuracy', accuracy])
+        if roc_auc is not None:
+            writer.writerow(['ROC-AUC', roc_auc])
+        else:
+            writer.writerow(['ROC-AUC', 'Undefined (only one class)'])
 
     logging.info(f"Predictions saved to {model_name}_predictions_results.csv")
     logging.info(f"Metrics saved to {model_name}_metrics_summary.csv")
 
     return predictions_results, metrics_summary
 
-def evaluate_only(model_path, model_name, test_path, output_dir, classes = {'No_Glaucoma': 0, 'Suspected_Glaucoma': 1}):
-    test_datagen = ImageDataGenerator(preprocessing_function=preprocess_input_vgg19)
+def evaluate_only(model_path, model_name, test_path, output_dir, classes):
+    if not classes:
+        classes = {'No_Glaucoma': 0, 'Suspected_Glaucoma': 1}
+    test_datagen = image.ImageDataGenerator(preprocessing_function=preprocess_input_vgg19)
 
     model = tf.keras.models.load_model(model_path,
                                        custom_objects={'f1_score_normal': f1_score_normal})
@@ -161,7 +180,8 @@ def evaluate_only(model_path, model_name, test_path, output_dir, classes = {'No_
         test_path,
         target_size=(224, 224),
         class_mode='binary',
-        classes = classes
+        classes = classes,
+        shuffle = False,
     )
     return evaluate_model(model, model_name, test_generator, output_dir)
 
@@ -294,26 +314,103 @@ def train_and_evaluate(train_path,
     model.save(model_save_path)
 
     hist_df = pd.DataFrame(training_log.history) 
-    training_history_csv = os.path.join(log_path, f'training_history_{model_name}')
+    training_history_csv = os.path.join(log_path, f'training_history_{model_name}.csv')
     hist_df.to_csv(training_history_csv, index=False)
     logging.info(f"{model_name} Model trained, Model and training history are saved successfully.")
     return  predictions_results, metrics_summary, model_save_path, training_history_csv
 
-def main(train_path, valid_path, test_path, model_path, log_path, eval_path,best_hyperparameters_json_path, model_name):
-    logging.basicConfig(level=logging.INFO)
-    
-    with open(best_hyperparameters_json_path, 'r') as file:
-        best_params = json.load(file)
+def predict_single_image(img_path, model_path, classes):
+    if not classes:
+        classes={'No_Glaucoma': 0, 'Suspected_Glaucoma': 1}
+    tf.keras.backend.clear_session()
+    model = tf.keras.models.load_model(model_path,custom_objects={'f1_score_normal': f1_score_normal})
+    img = image.load_img(img_path, target_size=(224, 224))
+    img_array = image.img_to_array(img)
+    img_array = np.expand_dims(img_array, axis=0)
+    img_array = preprocess_input_vgg19(img_array)
 
-    train_and_evaluate(train_path, valid_path, test_path, model_path, log_path, eval_path,best_hyperparameters_json_path, model_name)
+    prediction = model.predict(img_array).flatten()[0]
+    predicted_class = int(prediction > 0.5)
+    class_label_map = {v: k for k, v in classes.items()}
 
-if __name__ == '__main__':
+    print("Model predicted: ", class_label_map[predicted_class])
+    return  class_label_map[predicted_class]
+
+
+def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--train_path', type=str, required=True, help='Path to the training images')
-    parser.add_argument('--valid_path', type=str, required=True, help='Path to the validation images')
-    parser.add_argument('--test_path', type=str, required=True, help='Path to the test images')
-    parser.add_argument('--output_path', type=str, required=True, help='Path where the trained model should be saved')
-    parser.add_argument('--best_hyperparameters_json_path', type=str, required=True, help='Path to the JSON file with best hyperparameters')
-    parser.add_argument('--model_name', type=str, required=True, help='Name of the Trained model with best hyperparameters')
+    parser.add_argument('--mode', type=str, required=True, choices=['train', 'evaluate', 'predict'], help='Operation mode')
+    parser.add_argument('--model_path', type=str,  help='Path to load or save model')
+    parser.add_argument('--model_name', type=str, help='Model name for saving or loading')
+    parser.add_argument('--train_path', type=str, help='Path to training images')
+    parser.add_argument('--valid_path', type=str, help='Path to validation images')
+    parser.add_argument('--test_path', type=str, help='Path to test images')
+    parser.add_argument('--log_path', type=str, help='Path to save training logs')
+    parser.add_argument('--eval_path', type=str, help='Path to save evaluation results')
+    parser.add_argument('--hyperparameters_json_path', required=False, default=None, type=str, help='Path to hyperparameters JSON')
+    parser.add_argument('--image_path', type=str, help='Path to a single image for prediction')
+    parser.add_argument('--classes_definition', type=str, required=False, default=None, help='A dictionary of classes definition')
+
     args = parser.parse_args()
-    main(args.train_path, args.valid_path, args.test_path, args.output_path, args.best_hyperparameters_json_path)
+
+    if args.classes_definition:
+        try:
+            args.classes_definition = ast.literal_eval(args.classes_definition)
+            if not isinstance(args.classes_definition, dict):
+                print("Classes definition has to be a dictionary, e.g. {'No_Glaucoma': 0, 'Suspected_Glaucoma': 1}")
+                args.classes_definition = None  
+        except Exception as e:
+            print("Classes definition has to be a dictionary, e.g. {'No_Glaucoma': 0, 'Suspected_Glaucoma': 1}")
+            args.classes_definition = None 
+    else:
+        args.classes_definition = None
+
+    logging.basicConfig(level=logging.INFO)
+
+    if args.mode == 'train':
+        required_args = ['train_path', 'valid_path', 'test_path', 'log_path', 'eval_path', 'model_name']
+        missing_args = [arg for arg in required_args if getattr(args, arg) is None]
+        if missing_args:
+            parser.error(f"Missing required arguments for training: {', '.join(missing_args)}")
+            
+        return train_and_evaluate(
+            train_path=args.train_path,
+            valid_path=args.valid_path,
+            test_path=args.test_path,
+            model_path=args.model_path,
+            log_path=args.log_path,
+            eval_path=args.eval_path,
+            model_name=args.model_name,
+            best_hyperparameters_json_path=args.hyperparameters_json_path,
+            classes= args.classes_definition
+        )
+
+    elif args.mode == 'evaluate':
+        required_args = ['model_name', 'model_path', 'test_path', 'eval_path']
+        missing_args = [arg for arg in required_args if getattr(args, arg) is None]
+        if missing_args:
+            parser.error(f"Missing required arguments for prediction: {', '.join(missing_args)}")
+
+        return evaluate_only(
+            model_path=args.model_path,
+            model_name=args.model_name,
+            test_path=args.test_path,
+            output_dir=Path(args.eval_path),
+            classes = args.classes_definition
+        )
+
+    elif args.mode == 'predict':
+        required_args = ['image_path', 'model_path']
+        missing_args = [arg for arg in required_args if getattr(args, arg) is None]
+        if missing_args:
+            parser.error(f"Missing required arguments for prediction: {', '.join(missing_args)}")
+            
+        return  predict_single_image(
+            img_path=args.image_path,
+            model_path=args.model_path,
+            classes= args.classes_definition
+        )
+   
+    
+if __name__ == '__main__':
+    main()
