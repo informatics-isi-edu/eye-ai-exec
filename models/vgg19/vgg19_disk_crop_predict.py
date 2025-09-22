@@ -112,7 +112,8 @@ def save_svg(output_directory, annotation_type_rid, rid, raw_image_size, bbox, a
 
 
 def preprocess_and_crop(ds_bag, csv_path, output_csv_path, template_path, output_path, model_path,
-                        annotation_type_rid, annotation_type_name, cropped_image):
+                        annotation_type_rid, annotation_type_name, cropped_image, 
+                        crop_range=range(95, 116, 10)):
     model = load_model(model_path)
     # Template creation
     template = np.ones((50, 50), dtype="uint8") * 0
@@ -214,7 +215,7 @@ def preprocess_and_crop(ds_bag, csv_path, output_csv_path, template_path, output
             
         raw_image_size = {"width": img.shape[1], "height": img.shape[0]}
         resize_functions = [imgResize_primary, imgResize_secondary]  # Put resizing functions in a list
-        for crop_size in range(150, 200, 10):
+        for crop_size in crop_range:  # OG LAC (95,116,10), USC (150,200,10)
             for resize_function in resize_functions:  # Iterate over resizing functions
                 img = crop_to_eye(img)  # First, crop to eye
                 img_rs = resize_function(img)
